@@ -10,7 +10,17 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_02_13_170000) do
+ActiveRecord::Schema[8.1].define(version: 2026_04_19_120000) do
+  create_table "invoice_item_summaries", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "host", null: false
+    t.string "ksef_number", null: false
+    t.string "source", null: false
+    t.string "summary", null: false
+    t.datetime "updated_at", null: false
+    t.index ["host", "ksef_number"], name: "index_invoice_item_summaries_on_host_and_ksef_number", unique: true
+  end
+
   create_table "ksef_api_logs", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.float "duration"
@@ -33,12 +43,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_02_13_170000) do
     t.datetime "created_at", null: false
     t.text "error_message"
     t.string "host", null: false
-    t.string "nip", null: false
+    t.string "nip"
     t.string "profile_id"
     t.string "profile_name"
     t.string "refresh_token"
     t.string "refresh_token_valid_until"
-    t.string "seed_token", null: false
+    t.string "seed_token"
     t.integer "status", default: 0, null: false
     t.datetime "updated_at", null: false
     t.index ["profile_id"], name: "index_ksef_login_requests_on_profile_id"

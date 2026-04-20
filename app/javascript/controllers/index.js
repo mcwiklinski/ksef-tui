@@ -5,10 +5,12 @@
 import { application } from "controllers/application"
 
 import InvoiceDateFilterController from "controllers/invoice_date_filter_controller"
+import InvoiceItemSummariesController from "controllers/invoice_item_summaries_controller"
 import InvoicePdfDownloadController from "controllers/invoice_pdf_download_controller"
 import LoginStatusController from "controllers/login_status_controller"
 import MenuController from "controllers/menu_controller"
 application.register("invoice-date-filter", InvoiceDateFilterController)
+application.register("invoice-item-summaries", InvoiceItemSummariesController)
 application.register("invoice-pdf-download", InvoicePdfDownloadController)
 application.register("login-status", LoginStatusController)
 application.register("menu", MenuController)

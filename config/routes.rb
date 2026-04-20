@@ -23,8 +23,11 @@ Rails.application.routes.draw do
   end
   resources :invoices, only: [ :index, :show ] do
     get :download_csv, on: :collection
+    post :regenerate_summaries, on: :collection
     get :download, on: :member
     get :xml, on: :member, defaults: { format: :xml }
+    get :item_summary, on: :member, defaults: { format: :json }
+    post :regenerate_item_summary, on: :member, defaults: { format: :json }
   end
   get "login", to: "sessions#new"
   delete "logout", to: "sessions#destroy"

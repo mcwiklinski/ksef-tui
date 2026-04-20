@@ -89,6 +89,15 @@
 
     <div class="flex flex-wrap items-center gap-3">
       <% if @invoices.any? && @filter.error.blank? %>
+        <%= button_to regenerate_summaries_invoices_path(@filter.request_params),
+          method: :post,
+          class: "group bg-white border border-amber-300 text-amber-700 hover:border-amber-500 hover:text-amber-800 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 flex items-center shadow-sm hover:shadow" do %>
+          <svg class="w-4 h-4 mr-2 text-amber-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+          Regenerate summaries
+        <% end %>
+      <% end %>
+
+      <% if @invoices.any? && @filter.error.blank? %>
         <%= link_to download_csv_invoices_path(@filter.request_params.merge(format: :csv)), class: "group bg-white border border-gray-300 text-gray-700 hover:border-emerald-500 hover:text-emerald-600 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 flex items-center shadow-sm hover:shadow" do %>
           <svg class="w-4 h-4 mr-2 text-gray-400 group-hover:text-emerald-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v10m0 0l-4-4m4 4l4-4m3 6H5"></path></svg>
           Download CSV
@@ -107,13 +116,22 @@
     </div>
   </div>
 
-  <div class="overflow-x-auto">
+  <div
+    class="overflow-x-auto"
+    data-controller="invoice-item-summaries"
+    data-invoice-item-summaries-concurrency-value="4"
+    data-invoice-item-summaries-max-attempts-value="3"
+    data-invoice-item-summaries-placeholder-value="Waiting for summary..."
+    data-invoice-item-summaries-retry-delay-value="800"
+    data-invoice-item-summaries-failure-text-value="Unavailable"
+  >
     <table class="w-full text-sm text-left">
       <thead class="bg-gray-50/50 text-gray-500 font-medium border-b border-gray-100 uppercase tracking-wider text-xs">
         <tr>
           <th class="px-6 py-4">Invoice Details</th>
           <th class="px-6 py-4">Date</th>
           <th class="px-6 py-4">Subject</th>
+          <th class="px-6 py-4">Summary</th>
           <th class="px-6 py-4 text-right">Amount</th>
           <th class="px-6 py-4 text-center">Type</th>
           <th class="px-6 py-4"></th>
@@ -122,7 +140,8 @@
       <tbody class="divide-y divide-gray-100">
         <% if @invoices.any? %>
           <% @invoices.each do |invoice| %>
-            <tr class="group hover:bg-gray-50/80 transition-colors">
+            <% summary_record = @invoice_summaries[invoice.ksef_number] %>
+            <tr class="group hover:bg-gray-50/80 transition-colors" data-ksef-number="<%= invoice.ksef_number %>">
               <td class="px-6 py-4">
                 <div class="flex flex-col">
                     <span class="font-semibold text-gray-900 text-sm"><%= invoice.invoice_number || "No Number" %></span>
@@ -140,6 +159,53 @@
                     <span class="text-gray-900 font-medium"><%= invoice.seller_name %></span>
                     <span class="text-xs text-gray-500">NIP: <%= invoice.seller_nip %></span>
                  </div>
+              </td>
+              <td class="px-6 py-4">
+                <% if summary_record.present? %>
+                  <% summary_status = "ready" %>
+                  <% summary_url = nil %>
+                  <% summary_classes = "text-gray-700" %>
+                <% else %>
+                  <% summary_status = "missing" %>
+                  <% summary_url = item_summary_invoice_path(invoice.ksef_number) %>
+                  <% summary_classes = "text-gray-500" %>
+                <% end %>
+                <div class="flex items-start gap-2">
+                  <span
+                    data-invoice-item-summaries-target="cell"
+                    data-summary-status="<%= summary_status %>"
+                    data-summary-url="<%= summary_url %>"
+                    class="<%= summary_classes %> min-w-0 flex-1"
+                    <% unless summary_record.present? %>aria-busy="true"<% end %>
+                  >
+                    <% if summary_record.present? %>
+                      <%= summary_record.summary %>
+                    <% else %>
+                      <span class="inline-flex items-center gap-2 text-gray-500">
+                        <svg class="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                          <circle class="opacity-25" cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3"></circle>
+                          <path class="opacity-90" d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="3" stroke-linecap="round"></path>
+                        </svg>
+                        <span>Waiting for summary...</span>
+                      </span>
+                    <% end %>
+                  </span>
+
+                  <% if Rails.env.development? || Rails.env.test? %>
+                    <button
+                      type="button"
+                      class="inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-indigo-50 hover:text-indigo-700"
+                      data-action="invoice-item-summaries#regenerate"
+                      data-regenerate-url="<%= regenerate_item_summary_invoice_path(invoice.ksef_number) %>"
+                      aria-label="Regenerate summary for <%= invoice.ksef_number %>"
+                      title="Regenerate summary"
+                    >
+                      <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                      </svg>
+                    </button>
+                  <% end %>
+                </div>
               </td>
               <td class="px-6 py-4 text-right">
                 <div class="font-bold text-gray-900 tracking-tight">
@@ -161,7 +227,7 @@
           <% end %>
         <% else %>
           <tr>
-            <td colspan="6" class="px-6 py-12 text-center">
+            <td colspan="7" class="px-6 py-12 text-center">
               <div class="flex flex-col items-center justify-center">
                   <div class="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mb-4">
                       <svg class="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>

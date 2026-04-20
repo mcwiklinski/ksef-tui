@@ -11,10 +11,11 @@ class InvoicesController < ApplicationController
   end
 
   before_action :authenticate_session!
-  before_action :build_filter, only: [ :index, :download_csv ]
+  before_action :build_filter, only: [ :index, :download_csv, :regenerate_summaries ]
 
   def index
     @invoices = @filter.valid? ? load_invoices(query_params: @filter.query_params) : []
+    @invoice_summaries = preload_invoice_summaries(@invoices)
   end
 
   def download_csv
@@ -26,10 +27,51 @@ class InvoicesController < ApplicationController
     invoices = load_invoices(query_params: @filter.query_params, redirect_on_error: true)
     return if performed?
 
-    send_data invoices_to_csv(invoices),
+    invoice_summaries = resolve_invoice_summaries(invoices)
+
+    send_data invoices_to_csv(invoices, invoice_summaries: invoice_summaries),
       filename: "invoices-#{Date.current.iso8601}.csv",
       type: "text/csv; charset=utf-8",
       disposition: "attachment"
+  end
+
+  def regenerate_summaries
+    unless @filter.valid?
+      redirect_to invoices_path(@filter.request_params), alert: @filter.error
+      return
+    end
+
+    invoices = load_invoices(query_params: @filter.query_params, redirect_on_error: true)
+    return if performed?
+
+    cleared_count = clear_invoice_summaries(invoices)
+    notice =
+      if cleared_count.positive?
+        "Cleared #{cleared_count} summaries. The list will regenerate them in the background."
+      else
+        "No cached summaries were found for the current list."
+      end
+
+    redirect_to invoices_path(@filter.request_params), notice: notice
+  end
+
+  def item_summary
+    summary = summary_resolver.resolve(ksef_number: params[:id])
+    render_summary_json(summary)
+  rescue Ksef::InvoiceError => e
+    render json: { error: "Failed to generate invoice summary: #{e.message}" }, status: invoice_error_status(e)
+  rescue ActiveRecord::RecordInvalid => e
+    render json: { error: "Failed to save invoice summary: #{e.record.errors.full_messages.to_sentence}" }, status: :unprocessable_entity
+  end
+
+  def regenerate_item_summary
+    clear_invoice_summary(params[:id])
+    summary = summary_resolver.resolve(ksef_number: params[:id])
+    render_summary_json(summary)
+  rescue Ksef::InvoiceError => e
+    render json: { error: "Failed to generate invoice summary: #{e.message}" }, status: invoice_error_status(e)
+  rescue ActiveRecord::RecordInvalid => e
+    render json: { error: "Failed to save invoice summary: #{e.record.errors.full_messages.to_sentence}" }, status: :unprocessable_entity
   end
 
   def show
@@ -74,14 +116,15 @@ class InvoicesController < ApplicationController
     handle_invoice_fetch_error(e, redirect_on_error: redirect_on_error)
   end
 
-  def invoices_to_csv(invoices)
+  def invoices_to_csv(invoices, invoice_summaries:)
     CSV.generate do |csv|
       csv << [
         "Invoice issue date",
         "Seller name",
         "Net total amount (excluding VAT)",
         "Total amount including VAT",
-        "Currency"
+        "Currency",
+        "Item summary"
       ]
 
       invoices.each do |invoice|
@@ -90,10 +133,58 @@ class InvoicesController < ApplicationController
           sanitize_csv_text_cell(invoice.seller_name),
           invoice.net_amount,
           invoice.gross_amount,
-          invoice.currency
+          invoice.currency,
+          sanitize_csv_text_cell(invoice_summaries.fetch(invoice.ksef_number).summary)
         ]
       end
     end
+  end
+
+  def preload_invoice_summaries(invoices)
+    return {} if invoices.empty?
+
+    InvoiceItemSummary
+      .for_host(current_client.host)
+      .where(ksef_number: invoices.map(&:ksef_number))
+      .index_by(&:ksef_number)
+  end
+
+  def resolve_invoice_summaries(invoices)
+    summaries = preload_invoice_summaries(invoices)
+
+    invoices.each do |invoice|
+      summaries[invoice.ksef_number] ||= summary_resolver.resolve(ksef_number: invoice.ksef_number)
+    end
+
+    summaries
+  end
+
+  def clear_invoice_summaries(invoices)
+    return 0 if invoices.empty?
+
+    InvoiceItemSummary
+      .for_host(current_client.host)
+      .where(ksef_number: invoices.map(&:ksef_number))
+      .delete_all
+  end
+
+  def clear_invoice_summary(ksef_number)
+    InvoiceItemSummary
+      .for_host(current_client.host)
+      .where(ksef_number: ksef_number)
+      .delete_all
+  end
+
+  def summary_resolver
+    @summary_resolver ||= Invoices::ItemSummaryResolver.new(client: current_client)
+  end
+
+  def render_summary_json(summary)
+    render json: {
+      ksefNumber: summary.ksef_number,
+      summary: summary.summary,
+      source: summary.source
+    }
   end
 
   def sanitize_csv_text_cell(value)
@@ -138,5 +229,12 @@ class InvoicesController < ApplicationController
     end
 
     []
+  end
+
+  def invoice_error_status(error)
+    status = Integer(error.http_status, exception: false)
+    return status if status && status >= 400
+
+    :bad_gateway
   end
 end

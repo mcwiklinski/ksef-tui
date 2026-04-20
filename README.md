@@ -21,6 +21,7 @@ KSeF client project currently centered on a Terminal UI, with a Rails Web UI bei
 - Invoice list and invoice detail pages.
 - XML download for invoice source documents.
 - Browser-side PDF generation from invoice XML on the invoice detail page.
+- Invoice item summaries on the invoice list, with CSV export reuse.
 
 ## Web PDF Notes
 
@@ -56,6 +57,30 @@ profiles:
     token: "test-token"
     host: "api-test.ksef.mf.gov.pl"
 ```
+
+For OpenAI-powered invoice item summaries in the web UI and CSV export, you can either export the variables in your shell or create a local `.env` file. The app loads `.env.local` first and then `.env`, without overwriting variables that are already set in the environment.
+
+Example `.env`:
+
+```bash
+export OPENAI_API_KEY="your-openai-api-key"
+export OPENAI_MODEL="gpt-5.4-mini"
+```
+
+or as plain key/value entries in `.env`:
+
+```bash
+OPENAI_API_KEY=your-openai-api-key
+OPENAI_MODEL=gpt-5.4-mini
+```
+
+You can start from `.env.example`:
+
+```bash
+cp .env.example .env
+```
+
+If either variable is missing, the app falls back to a deterministic summary derived from the invoice item descriptions.
 
 ## Run TUI
 

@@ -128,6 +128,59 @@ class InvoicesTest < ActionDispatch::IntegrationTest
     assert_response :unauthorized
   end
 
+  def test_item_summary_endpoint_returns_generated_summary
+    authenticate_session!
+    stub_invoice_xml_fetch("KSEF-XML-1")
+
+    with_openai_configuration do
+      stub_openai_summaries("Pozycja XML")
+
+      get item_summary_invoice_path("KSEF-XML-1"), headers: { "ACCEPT" => "application/json" }
+    end
+
+    assert_response :success
+
+    payload = JSON.parse(response.body)
+    assert_equal "KSEF-XML-1", payload["ksefNumber"]
+    assert_equal "Pozycja XML", payload["summary"]
+    assert_equal "openai", payload["source"]
+  end
+
+  def test_regenerate_item_summary_endpoint_replaces_cached_summary
+    authenticate_session!
+    create_invoice_summary("KSEF-XML-1", summary: "Old summary")
+    stub_invoice_xml_fetch("KSEF-XML-1")
+
+    with_openai_configuration do
+      stub_openai_summaries("Fresh summary")
+
+      post regenerate_item_summary_invoice_path("KSEF-XML-1"), headers: { "ACCEPT" => "application/json" }
+    end
+
+    assert_response :success
+
+    payload = JSON.parse(response.body)
+    assert_equal "KSEF-XML-1", payload["ksefNumber"]
+    assert_equal "Fresh summary", payload["summary"]
+    assert_equal "openai", payload["source"]
+
+    summary = InvoiceItemSummary.find_by!(host: "api-test.example", ksef_number: "KSEF-XML-1")
+    assert_equal "Fresh summary", summary.summary
+    assert_equal 1, InvoiceItemSummary.where(host: "api-test.example", ksef_number: "KSEF-XML-1").count
+  end
+
+  def test_item_summary_endpoint_returns_unauthorized_without_session
+    get item_summary_invoice_path("KSEF-XML-1"), headers: { "ACCEPT" => "application/json" }
+
+    assert_response :unauthorized
+  end
+
+  def test_regenerate_item_summary_endpoint_returns_unauthorized_without_session
+    post regenerate_item_summary_invoice_path("KSEF-XML-1"), headers: { "ACCEPT" => "application/json" }
+
+    assert_response :unauthorized
+  end
+
   def test_index_redirects_to_login_when_session_expires_upstream
     authenticate_session!
     stub_request(:post, "https://api-test.example/v2/invoices/query/metadata?pageSize=100")
@@ -187,8 +240,24 @@ class InvoicesTest < ActionDispatch::IntegrationTest
     assert_select "button[type='submit'][name='range'][value='last_30_days']"
     assert_select "button[type='submit'][name='range'][value='this_month']", text: "This month (April 2026)"
     assert_select "button[type='submit'][name='range'][value='last_month']", text: "Last month (March 2026)"
+    assert_select "form[action='#{regenerate_summaries_invoices_path}'] button", text: "Regenerate summaries"
     assert_select "a[href='#{download_csv_invoices_path(format: :csv)}']", text: "Download CSV"
     assert_invoice_query_requested(from: Date.new(2026, 4, 1), to: Date.new(2026, 4, 18))
+  end
+
+  def test_index_renders_cached_and_pending_item_summaries
+    authenticate_session!
+    create_invoice_summary("KSEF-1", summary: "Cached office gear")
+    stub_invoice_list_fetch
+
+    get invoices_path
+
+    assert_response :success
+    assert_select "th", text: "Summary"
+    assert_select "tr[data-ksef-number='KSEF-1'] span[data-summary-status='ready']", text: "Cached office gear"
+    assert_select "tr[data-ksef-number='KSEF-2'] span[data-summary-status='missing'][aria-busy='true']", text: "Waiting for summary..."
+    assert_select "tr[data-ksef-number='KSEF-1'] button[data-action='invoice-item-summaries#regenerate'][data-regenerate-url='#{regenerate_item_summary_invoice_path("KSEF-1")}']"
+    assert_select "tr[data-ksef-number='KSEF-2'] button[data-action='invoice-item-summaries#regenerate'][data-regenerate-url='#{regenerate_item_summary_invoice_path("KSEF-2")}']"
   end
 
   def test_index_uses_last_30_days_preset_when_explicitly_selected
@@ -325,12 +394,48 @@ class InvoicesTest < ActionDispatch::IntegrationTest
     get invoices_path
 
     assert_response :success
+    assert_select "button", text: "Regenerate summaries", count: 0
     assert_select "span[aria-disabled='true']", text: "Download CSV"
     assert_select "a", text: "Download CSV", count: 0
   end
 
+  def test_regenerate_summaries_clears_cached_summaries_for_current_list_and_redirects_back
+    authenticate_session!
+    create_invoice_summary("KSEF-1", summary: "Office supplies")
+    create_invoice_summary("KSEF-2", summary: "Consulting services")
+    InvoiceItemSummary.create!(
+      host: "api-other.example",
+      ksef_number: "KSEF-1",
+      summary: "Other host summary",
+      source: "openai"
+    )
+    InvoiceItemSummary.create!(
+      host: "api-test.example",
+      ksef_number: "KSEF-OTHER",
+      summary: "Untouched summary",
+      source: "openai"
+    )
+
+    travel_to Time.utc(2026, 4, 18, 10, 0, 0) do
+      stub_invoice_list_fetch
+
+      post regenerate_summaries_invoices_path, params: { range: "this_month" }
+    end
+
+    assert_redirected_to invoices_path(range: "this_month")
+    follow_redirect!
+    assert_response :success
+    assert_match(/Cleared 2 summaries\. The list will regenerate them in the background\./, response.body)
+    assert_nil InvoiceItemSummary.find_by(host: "api-test.example", ksef_number: "KSEF-1")
+    assert_nil InvoiceItemSummary.find_by(host: "api-test.example", ksef_number: "KSEF-2")
+    assert_predicate InvoiceItemSummary.find_by(host: "api-other.example", ksef_number: "KSEF-1"), :present?
+    assert_predicate InvoiceItemSummary.find_by(host: "api-test.example", ksef_number: "KSEF-OTHER"), :present?
+  end
+
   def test_download_csv_endpoint_returns_invoice_csv_attachment
     authenticate_session!
+    create_invoice_summary("KSEF-1", summary: "Office supplies")
+    create_invoice_summary("KSEF-2", summary: "Consulting services")
 
     travel_to Time.utc(2026, 4, 18, 10, 0, 0) do
       stub_invoice_list_fetch
@@ -351,16 +456,19 @@ class InvoicesTest < ActionDispatch::IntegrationTest
       "Seller name",
       "Net total amount (excluding VAT)",
       "Total amount including VAT",
-      "Currency"
+      "Currency",
+      "Item summary"
     ], rows.headers
     assert_equal 2, rows.length
-    assert_equal [ "2026-02-11", "Acme Sp. z o.o.", "100.00", "123.00", "PLN" ], rows[0].fields
-    assert_equal [ "2026-02-12", "Beta S.A.", "200.00", "246.00", "EUR" ], rows[1].fields
+    assert_equal [ "2026-02-11", "Acme Sp. z o.o.", "100.00", "123.00", "PLN", "Office supplies" ], rows[0].fields
+    assert_equal [ "2026-02-12", "Beta S.A.", "200.00", "246.00", "EUR", "Consulting services" ], rows[1].fields
     assert_invoice_query_requested(from: Date.new(2026, 4, 1), to: Date.new(2026, 4, 18))
   end
 
   def test_download_csv_endpoint_escapes_formula_like_seller_names
     authenticate_session!
+    create_invoice_summary("KSEF-1", summary: "Office supplies")
+    create_invoice_summary("KSEF-2", summary: "Consulting services")
     stub_invoice_list_fetch(invoices: [
       @invoice_list.first.deep_dup.tap { |invoice| invoice[:seller][:name] = "=CMD|' /C calc'!A0" },
       @invoice_list.second.deep_dup.tap { |invoice| invoice[:seller][:name] = " \t@SUM(A1:A2)" }
@@ -378,8 +486,32 @@ class InvoicesTest < ActionDispatch::IntegrationTest
     assert_equal "' \t@SUM(A1:A2)", rows[1]["Seller name"]
   end
 
+  def test_download_csv_endpoint_generates_missing_summaries_before_export
+    authenticate_session!
+    create_invoice_summary("KSEF-1", summary: "Cached office gear")
+    stub_invoice_list_fetch
+    stub_invoice_xml_fetch("KSEF-2")
+
+    with_openai_configuration do
+      stub_openai_summaries("Pozycja XML")
+
+      travel_to Time.utc(2026, 4, 18, 10, 0, 0) do
+        get download_csv_invoices_path(format: :csv)
+      end
+    end
+
+    assert_response :success
+
+    rows = CSV.parse(response.body, headers: true)
+    assert_equal "Cached office gear", rows[0]["Item summary"]
+    assert_equal "Pozycja XML", rows[1]["Item summary"]
+    assert_equal "Pozycja XML", InvoiceItemSummary.find_by!(host: "api-test.example", ksef_number: "KSEF-2").summary
+  end
+
   def test_download_csv_endpoint_uses_the_active_filtered_range
     authenticate_session!
+    create_invoice_summary("KSEF-1", summary: "Office supplies")
+    create_invoice_summary("KSEF-2", summary: "Consulting services")
 
     travel_to Time.utc(2026, 4, 18, 10, 0, 0) do
       stub_invoice_list_fetch
@@ -394,6 +526,8 @@ class InvoicesTest < ActionDispatch::IntegrationTest
 
   def test_download_csv_endpoint_uses_the_selected_custom_date_range
     authenticate_session!
+    create_invoice_summary("KSEF-1", summary: "Office supplies")
+    create_invoice_summary("KSEF-2", summary: "Consulting services")
     stub_invoice_list_fetch
 
     get download_csv_invoices_path(
@@ -489,6 +623,32 @@ class InvoicesTest < ActionDispatch::IntegrationTest
       .to_return(status: 200, body: @invoice_xml, headers: { "Content-Type" => "application/xml" })
   end
 
+  def stub_openai_summaries(*summaries)
+    stub_request(:post, openai_responses_api_url)
+      .with do |request|
+        body = JSON.parse(request.body)
+
+        assert_equal "test-openai-key", request.headers["Authorization"]&.delete_prefix("Bearer ")
+        assert_equal "gpt-5.4-mini", body["model"]
+        assert_equal false, body["store"]
+        assert_equal "low", body.dig("reasoning", "effort")
+        assert_equal "low", body.dig("text", "verbosity")
+        assert_equal 0.1, body["temperature"]
+        body["input"].to_s.include?("Seller context: XML Seller") &&
+          body["input"].to_s.include?("Invoice type: VAT") &&
+          body["input"].to_s.include?("Item lines:") &&
+          !body["input"].to_s.include?("XML Buyer") &&
+          !body["input"].to_s.include?("Sprzedazowa")
+      end
+      .to_return(*summaries.map do |summary|
+        {
+          status: 200,
+          body: openai_response_payload(summary).to_json,
+          headers: { "Content-Type" => "application/json" }
+        }
+      end)
+  end
+
   def stub_invoice_list_fetch(invoices: @invoice_list)
     stub_request(:post, invoice_query_api_url)
       .with(headers: { "Authorization" => "Bearer session-token" })
@@ -519,5 +679,48 @@ class InvoicesTest < ActionDispatch::IntegrationTest
 
   def invoice_xml_api_url(ksef_number)
     "https://api-test.example/v2/invoices/ksef/#{ksef_number}"
+  end
+
+  def openai_responses_api_url
+    "https://api.openai.com/v1/responses"
+  end
+
+  def openai_response_payload(summary)
+    {
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: summary,
+              annotations: []
+            }
+          ]
+        }
+      ]
+    }
+  end
+
+  def create_invoice_summary(ksef_number, summary:, source: "openai")
+    InvoiceItemSummary.create!(
+      host: "api-test.example",
+      ksef_number: ksef_number,
+      summary: summary,
+      source: source
+    )
+  end
+
+  def with_openai_configuration
+    original_api_key = ENV["OPENAI_API_KEY"]
+    original_model = ENV["OPENAI_MODEL"]
+
+    ENV["OPENAI_API_KEY"] = "test-openai-key"
+    ENV["OPENAI_MODEL"] = "gpt-5.4-mini"
+    yield
+  ensure
+    ENV["OPENAI_API_KEY"] = original_api_key
+    ENV["OPENAI_MODEL"] = original_model
   end
 end
